@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>13</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Authors>Media2A.com</Authors>
+    <Company>Media2A</Company>
+    <Product>CodeLogic Framework</Product>
+    <Description>Modern, extensible application framework with logging, localization, caching, and plugin support</Description>
+    <Version>2.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="K4os.Compression.LZ4.Streams" Version="1.3.8" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0-*" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.0-*" />
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.0-*" />
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.0-*" />
+  </ItemGroup>
+
+</Project>
