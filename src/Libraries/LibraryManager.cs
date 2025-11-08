@@ -41,7 +41,9 @@ public class LibraryManager
         try
         {
             // Look for library DLLs (starting with "CL." to avoid loading system/framework DLLs)
-            var dllFiles = Directory.GetFiles(_librariesDirectory, "CL.*.dll", SearchOption.TopDirectoryOnly);
+            var dllFiles = Directory.GetFiles(_librariesDirectory, "CL.*.dll", SearchOption.TopDirectoryOnly)
+                .Concat(Directory.GetFiles(_librariesDirectory, "WebLogic.Modules.*.dll", SearchOption.TopDirectoryOnly))
+                .ToArray();
 
             foreach (var dllFile in dllFiles)
             {
@@ -269,6 +271,14 @@ public class LibraryManager
     }
 
     /// <summary>
+    /// Gets all loaded library instances
+    /// </summary>
+    public IEnumerable<ILibrary> GetLoadedLibraryInstances()
+    {
+        return _loadedLibraries.Values.Select(e => e.Instance);
+    }
+
+    /// <summary>
     /// Gets library instance by ID
     /// </summary>
     public ILibrary? GetLibrary(string libraryId)
@@ -314,6 +324,44 @@ public class LibraryManager
         {
             await UnloadLibraryAsync(id);
         }
+    }
+
+    /// <summary>
+    /// Register an already loaded library with the LibraryManager.
+    /// This is useful for libraries loaded through external discovery providers.
+    /// </summary>
+    /// <param name="library">The library instance to register</param>
+    /// <param name="context">The library context</param>
+    /// <param name="assemblyPath">Path to the library assembly</param>
+    public void RegisterLoadedLibrary(ILibrary library, LibraryContext context, string assemblyPath)
+    {
+        if (library == null)
+            throw new ArgumentNullException(nameof(library));
+
+        if (library.Manifest == null)
+            throw new InvalidOperationException("Library manifest cannot be null");
+
+        var libraryId = library.Manifest.Id;
+
+        if (_loadedLibraries.ContainsKey(libraryId))
+        {
+            throw new InvalidOperationException($"Library '{libraryId}' is already registered");
+        }
+
+        var loadedLibrary = new LoadedLibrary
+        {
+            Info = new LibraryInfo
+            {
+                Manifest = library.Manifest,
+                AssemblyPath = assemblyPath,
+                TypeName = library.GetType().FullName ?? library.GetType().Name
+            },
+            Instance = library,
+            Context = context,
+            LoadedAt = DateTime.UtcNow
+        };
+
+        _loadedLibraries.TryAdd(libraryId, loadedLibrary);
     }
 
     /// <summary>

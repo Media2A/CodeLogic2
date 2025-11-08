@@ -16,6 +16,7 @@ public class Framework : IDisposable
 {
     private readonly FrameworkOptions _options;
     private bool _initialized;
+    private readonly List<ILibraryDiscoveryProvider> _discoveryProviders = new();
 
     public ConfigurationManager Configuration { get; private set; } = null!;
     public LoggerFactory LoggerFactory { get; private set; } = null!;
@@ -276,8 +277,14 @@ public class Framework : IDisposable
         Console.WriteLine("\n=== CodeLogic Framework Shutdown ===\n");
         Logger.Info("Shutting down CodeLogic Framework");
 
+        // Call OnApplicationStopping lifecycle hooks
+        await InvokeLifecycleHookAsync(lib => lib.OnApplicationStoppingAsync(), "OnApplicationStopping");
+
         // Unload all libraries
         await Libraries.UnloadAllAsync();
+
+        // Call OnApplicationStopped lifecycle hooks
+        await InvokeLifecycleHookAsync(lib => lib.OnApplicationStoppedAsync(), "OnApplicationStopped");
 
         // Flush logs
         await Logging.Logger.FlushAllAsync();
@@ -286,6 +293,179 @@ public class Framework : IDisposable
 
         Console.WriteLine("\n✓ Framework shutdown complete\n");
         Logger.Info("Framework shutdown complete");
+    }
+
+    /// <summary>
+    /// Register a library discovery provider
+    /// </summary>
+    /// <param name="provider">Discovery provider to register</param>
+    public void RegisterDiscoveryProvider(ILibraryDiscoveryProvider provider)
+    {
+        if (provider == null)
+            throw new ArgumentNullException(nameof(provider));
+
+        _discoveryProviders.Add(provider);
+        Logger?.Info($"Registered discovery provider: {provider.GetType().Name}");
+    }
+
+    /// <summary>
+    /// Discover and load libraries from all registered discovery providers
+    /// </summary>
+    /// <returns>Result containing discovery statistics</returns>
+    public async Task<DiscoveryLoadResult> DiscoverAndLoadLibrariesAsync()
+    {
+        if (!_initialized)
+            throw new InvalidOperationException("Framework must be initialized before discovering libraries");
+
+        var result = new DiscoveryLoadResult();
+
+        if (_discoveryProviders.Count == 0)
+        {
+            Logger.Warning("No discovery providers registered");
+            return result;
+        }
+
+        Console.WriteLine($"\n=== Discovering Libraries from {_discoveryProviders.Count} Provider(s) ===\n");
+        Logger.Info($"Running discovery from {_discoveryProviders.Count} provider(s)");
+
+        // Run all discovery providers
+        foreach (var provider in _discoveryProviders)
+        {
+            try
+            {
+                var providerName = provider.GetType().Name;
+                Logger.Info($"Running discovery provider: {providerName}");
+
+                var discoveries = await provider.DiscoverLibrariesAsync();
+                var discoveredList = discoveries.ToList();
+
+                result.TotalDiscovered += discoveredList.Count;
+
+                foreach (var discovery in discoveredList)
+                {
+                    try
+                    {
+                        // Check if already loaded
+                        if (Libraries.GetLibrary(discovery.LibraryId) != null)
+                        {
+                            Logger.Info($"Library '{discovery.LibraryId}' already loaded, skipping");
+                            result.AlreadyLoaded++;
+                            continue;
+                        }
+
+                        // If the provider already instantiated the library, use it
+                        if (discovery.LibraryInstance != null)
+                        {
+                            var library = discovery.LibraryInstance;
+
+                            // Create library context
+                            var context = new LibraryContext
+                            {
+                                DataDirectory = Path.Combine(_options.DataDirectory, library.Manifest.Id),
+                                Logger = Logger,
+                                Configuration = new Dictionary<string, object>(),
+                                Services = new FrameworkServiceProvider(this)
+                            };
+
+                            Directory.CreateDirectory(context.DataDirectory);
+
+                            // Load and initialize the library
+                            await library.OnLoadAsync(context);
+                            await library.OnInitializeAsync();
+
+                            // Register with LibraryManager
+                            Libraries.RegisterLoadedLibrary(library, context, discovery.AssemblyPath);
+
+                            result.SuccessfullyLoaded++;
+                            Logger.Info($"Loaded library: {library.Manifest.Id} v{library.Manifest.Version}");
+                        }
+                        else
+                        {
+                            // Try to load from path
+                            var loadResult = await LoadLibraryAsync(discovery.LibraryId);
+                            if (loadResult.IsSuccess)
+                            {
+                                result.SuccessfullyLoaded++;
+                            }
+                            else
+                            {
+                                result.Failed++;
+                                result.Errors.Add($"{discovery.LibraryId}: {loadResult.ErrorMessage}");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Failed++;
+                        result.Errors.Add($"{discovery.LibraryId}: {ex.Message}");
+                        Logger.Error($"Failed to load discovered library '{discovery.LibraryId}'", ex);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Discovery provider failed: {provider.GetType().Name}", ex);
+            }
+        }
+
+        Console.WriteLine($"✓ Discovery complete: {result.SuccessfullyLoaded} loaded, {result.AlreadyLoaded} already loaded, {result.Failed} failed\n");
+
+        if (result.Errors.Count > 0)
+        {
+            Console.WriteLine("Discovery errors:");
+            foreach (var error in result.Errors)
+            {
+                Console.WriteLine($"  ✗ {error}");
+            }
+            Console.WriteLine();
+        }
+
+        Logger.Info($"Discovery complete: {result.TotalDiscovered} discovered, {result.SuccessfullyLoaded} loaded");
+
+        return result;
+    }
+
+    /// <summary>
+    /// Invoke application lifecycle hooks on all loaded libraries that implement IApplicationLifecycle
+    /// </summary>
+    /// <param name="services">Service provider for lifecycle hooks</param>
+    public async Task InvokeApplicationStartingAsync(IServiceProvider services)
+    {
+        await InvokeLifecycleHookAsync(lib => lib.OnApplicationStartingAsync(services), "OnApplicationStarting");
+    }
+
+    /// <summary>
+    /// Invoke application lifecycle hooks on all loaded libraries that implement IApplicationLifecycle
+    /// </summary>
+    /// <param name="services">Service provider for lifecycle hooks</param>
+    public async Task InvokeApplicationStartedAsync(IServiceProvider services)
+    {
+        await InvokeLifecycleHookAsync(lib => lib.OnApplicationStartedAsync(services), "OnApplicationStarted");
+    }
+
+    private async Task InvokeLifecycleHookAsync(Func<IApplicationLifecycle, Task> hookAction, string hookName)
+    {
+        var lifecycleLibraries = Libraries.GetLoadedLibraryInstances()
+            .Where(lib => lib is IApplicationLifecycle)
+            .Cast<IApplicationLifecycle>()
+            .ToList();
+
+        if (lifecycleLibraries.Count == 0)
+            return;
+
+        Logger.Debug($"Invoking {hookName} on {lifecycleLibraries.Count} library(ies)");
+
+        foreach (var library in lifecycleLibraries)
+        {
+            try
+            {
+                await hookAction(library);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Lifecycle hook {hookName} failed for library", ex);
+            }
+        }
     }
 
     private async Task GenerateDefaultConfigurationsAsync()
